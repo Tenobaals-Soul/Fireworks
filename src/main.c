@@ -66,10 +66,20 @@ typedef struct ParticleSystem {
     float (*remap)(float);
 } ParticleSystem;
 
+typedef struct Rocket {
+    float target_y;
+    VectorFloat speed;
+    VectorFloat position;
+    ParticleSystem* sys;
+    Trail* trail;
+    struct Rocket* next;
+} Rocket;
+
 long long last_time;
 VectorFloat mouse_pos = {0, 0};
 float mouse_rot = 0;
-ParticleSystem* first;
+ParticleSystem* first_sys = NULL;
+Rocket* first_rocket = NULL;
 
 long long __time_get_current_timestamp_internal(void) {
     struct timespec t;
@@ -120,10 +130,10 @@ void draw_oct(VectorFloat position, float radius, Vector screen_size, RGB color)
     glEnd();
 }
 
-void render_trail(Trail** data, unsigned long width, unsigned long existence, unsigned long now, 
-            VectorFloat alignment, float rotation, Vector dimension, RGB color);
+void update_trail(Trail** data, unsigned long width, unsigned long existence, unsigned long now, 
+            VectorFloat alignment, float rotation, Vector dimension, RGB color, char emmit);
 
-char update_particle(ParticleSystem* system, Particle* current, unsigned long now, Vector dimensions, float deltatime) {
+char update_particle(ParticleSystem* sys, Particle* current, unsigned long now, Vector dimensions, float deltatime) {
     if (current->die_at < now) return 1;
     current->position.x += sinf(current->direction) * current->speed * deltatime;
     current->position.y += cosf(current->direction) * current->speed * deltatime;
@@ -132,26 +142,35 @@ char update_particle(ParticleSystem* system, Particle* current, unsigned long no
     current->position.y += current->linear_speed.y * deltatime;
     if (current->position.x <= -dimensions.x || current->position.x >= dimensions.x) return 1;
     if (current->position.y <= -dimensions.y || current->position.y >= dimensions.y) return 1;
-    RGB color = lerp_color(system->color1, system->color2, 1 - ((current->die_at - now) / (float) (system->max_lifetime)));
+    RGB color = lerp_color(sys->color1, sys->color2, 1 - ((current->die_at - now) / (float) (sys->max_lifetime)));
     float size;
-    if (system->remap) {
-        size = system->start_size * system->remap(((current->die_at - now) / (float) (system->max_lifetime)));
+    if (sys->remap) {
+        size = sys->start_size * sys->remap(((current->die_at - now) / (float) (sys->max_lifetime)));
     }
     else {
-        size = system->start_size * ((current->die_at - now) / (float) (system->max_lifetime));
+        size = sys->start_size * ((current->die_at - now) / (float) (sys->max_lifetime));
     }
-    render_trail(&current->trail, size, system->trail_lifetime, now, current->position, current->direction + M_PI_2, dimensions, color);
+    update_trail(&current->trail, size * 1.2, sys->trail_lifetime, now, current->position, current->direction + M_PI_2, dimensions, color, 1);
     draw_oct(current->position, size, dimensions, color);
     return 0;
 }
 
-void update_system(ParticleSystem* system, Vector dimensions, unsigned long now, float deltatime) {
-    for (unsigned long i = 0; i < system->count; i++) {
-        if (system->current[i].active) {
-            if (update_particle(system, system->current + i, now, dimensions, deltatime)) {
-                // free trail
-                system->current[i].active = false;
-                system->active--;
+void free_trail(Trail* trail) {
+    while(trail) {
+        Trail* next = trail->next;
+        free(trail);
+        trail = next;
+    }
+}
+
+void update_system(ParticleSystem* sys, Vector dimensions, unsigned long now, float deltatime) {
+    for (unsigned long i = 0; i < sys->count; i++) {
+        if (sys->current[i].active) {
+            if (update_particle(sys, sys->current + i, now, dimensions, deltatime)) {
+                Trail* trail = sys->current[i].trail;
+                free_trail(trail);
+                sys->current[i].active = false;
+                sys->active--;
             }
         }
     }
@@ -177,47 +196,6 @@ void __render_trail(Trail* trail, unsigned long width, unsigned long existence, 
     glVertex2f(c2.x, c2.y);
     glVertex2f(c1.x, c1.y);
     if (trail->next) __render_trail(trail->next, width, existence, now, dimension);
-}
-
-void render_trail(Trail** data, unsigned long width, unsigned long existence, unsigned long now, 
-            VectorFloat alignment, float rotation, Vector dimension, RGB color) {
-    Trail* new_trail = malloc(sizeof(Trail));
-    new_trail->next = *data;
-    new_trail->since = now;
-    new_trail->position = alignment;
-    new_trail->angle = rotation;
-    new_trail->color = color;
-    *data = new_trail;
-    
-    Trail* trail = new_trail;
-    while(trail) {
-        Trail* next = trail->next;
-        Trail** next_data = &trail->next;
-        float factor = (float) existence - (float) (now - trail->since);
-        if (factor < 0) {
-            if (data) {
-                *data = NULL;
-                data = NULL;
-            }
-            free(trail);
-        }
-        else {
-            data = next_data;
-        }
-        trail = next;
-    }
-    if (new_trail) {
-        glColor3ub(color.r, color.g, color.b);
-        glBegin(GL_QUADS);
-        VectorFloat c = point((VectorFloat) {
-            alignment.x,
-            alignment.y
-        }, dimension);
-        glVertex2f(c.x, c.y);
-        glVertex2f(c.x, c.y);
-        __render_trail(new_trail, width, existence, now, dimension);
-        glEnd();
-    }
 }
 
 void init_particle(ParticleSystem* particle_system, int x, int y, int amount, unsigned long min_lifetime, 
@@ -248,6 +226,109 @@ void init_particle(ParticleSystem* particle_system, int x, int y, int amount, un
     }
 }
 
+float remap_blue(float in) {
+    in = in;
+    return in > 0.75f ? 1 : 0;
+}
+
+void init_random_particle(ParticleSystem* sys, int x, int y) {
+    switch (random() % 4) {
+    case 0:
+        init_particle(sys, x, y, 100, 200000, 500000, 100000, (RGB) {255, 255, 10},
+                (RGB) {255, 0, 0}, 100, 900, 5, NULL);
+        break;
+    case 1:
+        init_particle(sys, x, y, 100, 200000, 500000, 100000, (RGB) {100, 255, 120},
+                (RGB) {50, 200, 60}, 100, 900, 7, NULL);
+        break;
+    case 2:
+        init_particle(sys, x, y, 100, 500000, 1000000, 200000, (RGB) {255, 255, 255},
+                (RGB) {200, 200, 200}, 100, 500, 2, NULL);
+        break;
+    case 3:
+        init_particle(sys, x, y, 100, 800000, 2000000, 500000, (RGB) {0, 0, 255},
+                (RGB) {255, 0, 0}, 100, 900, 1, remap_blue);
+        break;
+    }
+}
+
+char update_rocket(Rocket* rocket, Vector dimensions, float deltatime) {
+    rocket->position.x += rocket->speed.x * deltatime;
+    rocket->position.y += rocket->speed.y * deltatime;
+    if (rocket->position.y >= rocket->target_y) {
+        init_random_particle(rocket->sys, rocket->position.x, rocket->position.y);
+        rocket->sys->next = first_sys;
+        first_sys = rocket->sys;
+        return 1;
+    }
+    update_trail(&rocket->trail, 2, 100000, last_time, rocket->position, 
+            -atan2f(rocket->speed.y, rocket->speed.x), dimensions, (RGB) {255, 120, 0}, 1);
+    return 0;
+}
+
+void update_trail(Trail** trail_location, unsigned long width, unsigned long existence, unsigned long now, 
+            VectorFloat alignment, float rotation, Vector dimension, RGB color, char emmit) {
+    Trail* first = *trail_location;
+    if (emmit) {
+        Trail* new_trail = malloc(sizeof(Trail));
+        new_trail->next = *trail_location;
+        new_trail->since = now;
+        new_trail->position = alignment;
+        new_trail->angle = rotation;
+        new_trail->color = color;
+        *trail_location = new_trail;
+        first = new_trail;
+    }
+    
+    Trail* trail = first;
+    while(trail) {
+        Trail* next = trail->next;
+        Trail** next_data = &trail->next;
+        float factor = (float) existence - (float) (now - trail->since);
+        if (factor < 0 || !trail_location) {
+            if (trail_location) {
+                *trail_location = NULL;
+                trail_location = NULL;
+            }
+            free(trail);
+        }
+        else {
+            trail_location = next_data;
+        }
+        trail = next;
+    }
+    if (first) {
+        glColor3ub(color.r, color.g, color.b);
+        glBegin(GL_QUADS);
+        VectorFloat c = point((VectorFloat) {
+            alignment.x,
+            alignment.y
+        }, dimension);
+        glVertex2f(c.x, c.y);
+        glVertex2f(c.x, c.y);
+        __render_trail(first, width, existence, now, dimension);
+        glEnd();
+    }
+}
+
+void make_rocket() {
+    ParticleSystem* new_system = malloc(sizeof(ParticleSystem));
+    Rocket* rocket = malloc(sizeof(Rocket));
+    float angle = ((float) random() / (float) RAND_MAX) * M_PI / 4 - M_PI / 8;
+    rocket->speed.x = sinf(angle) * 2000.0f;
+    rocket->speed.y = cosf(angle) * 2000.0f;
+    rocket->position.x = glutGet(GLUT_SCREEN_WIDTH) * (((float) random() / (float) RAND_MAX) * 0.6f + 0.2f);
+    rocket->position.y = 0;
+    float screen_height = glutGet(GLUT_SCREEN_HEIGHT);
+    rocket->target_y = cosf(angle) * screen_height / 2 + screen_height * ((float) random() / (float) RAND_MAX) / 2;
+    rocket->sys = new_system;
+    rocket->trail = NULL;
+    rocket->next = first_rocket;
+    first_rocket = rocket;
+}
+
+float rockets_per_second = 1.5f;
+
 void display() {
     long long now = __time_get_current_timestamp_internal();
     float deltatime = (now - last_time) / 10e5f;
@@ -256,20 +337,39 @@ void display() {
     Vector dimensions;
     dimensions.x = glutGet(GLUT_WINDOW_WIDTH);
     dimensions.y = glutGet(GLUT_WINDOW_HEIGHT);
-    glClearColor(0, 0, 0, 0.0);
+    glClearColor(0.0, 0.0, 0.0, 0.0);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    ParticleSystem* cursor = first;
-    ParticleSystem** prev = &first;
+    if ((float) random() < RAND_MAX * rockets_per_second * deltatime) {
+        make_rocket();
+    }
+
+    Rocket* rocket = first_rocket;
+    Rocket** prev_r = &first_rocket;
+    while (rocket) {
+        Rocket* next = rocket->next;
+        if (update_rocket(rocket, dimensions, deltatime)) {
+            *prev_r = next;
+            free_trail(rocket->trail);
+            free(rocket);
+        }
+        else {
+            prev_r = &rocket->next;
+        }
+        rocket = next;
+    }
+
+    ParticleSystem* cursor = first_sys;
+    ParticleSystem** prev_s = &first_sys;
     while (cursor) {
         update_system(cursor, dimensions, now, deltatime);
         if (cursor->active) {
-            prev = &cursor->next;
+            prev_s = &cursor->next;
             cursor = cursor->next;
         }
         else {
             ParticleSystem* next = cursor->next;
-            *prev = next;
+            *prev_s = next;
             free(cursor->current);
             free(cursor);
             cursor = next;
@@ -294,24 +394,17 @@ void mouse(int x, int y) {
     mouse_pos.y = new.y;
 }
 
-float remap(float in) {
-    return sinf(in * M_PI);
-}
-
 void mouse_event(int button, int state, int x, int y) {
+    y = glutGet(GLUT_WINDOW_HEIGHT) - y;
     if (button == GLUT_LEFT_BUTTON && state == GLUT_DOWN) {
-        ParticleSystem* new_system = malloc(sizeof(ParticleSystem));
-        init_particle(new_system, x, glutGet(GLUT_WINDOW_HEIGHT) - y, 
-                100, 200000, 500000, 100000, (RGB) {255, 255, 10},
-                (RGB) {255, 0, 0}, 100, 900, 5, NULL);
-        new_system->next = first;
-        first = new_system;
+        make_rocket();
     }
 }
 
 ParticleSystem particle_system;
 
 int main(int argc, char** argv) {
+    srandom(__time_get_current_timestamp_internal());
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_SINGLE | GLUT_RGB);
     glShadeModel(GL_FLAT);
@@ -337,7 +430,7 @@ int main(int argc, char** argv) {
 
     last_time = __time_get_current_timestamp_internal();
 
-    first = NULL;
+    first_sys = NULL;
 
     glutMainLoop();
     return 0;
